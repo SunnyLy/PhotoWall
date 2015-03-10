@@ -1,9 +1,11 @@
 package com.photowall.galis;
 
 import android.content.ContentResolver;
+import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.drawable.BitmapDrawable;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.provider.MediaStore;
@@ -20,6 +22,7 @@ import android.widget.ImageView;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.lang.ref.WeakReference;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.LinkedHashSet;
@@ -39,6 +42,8 @@ public class MainActivity extends FragmentActivity {
     private int mFirstVisibleItem;
     private int mVisibleItemCount;
     private boolean mIsFirstEnter = true;
+
+    private final Object mPauseWorkLock = new Object();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -74,24 +79,24 @@ public class MainActivity extends FragmentActivity {
         mShowPhotoGridView.setOnScrollListener(new AbsListView.OnScrollListener() {
             @Override
             public void onScrollStateChanged(AbsListView view, int scrollState) {
-                if (scrollState == SCROLL_STATE_IDLE) {
-                    loadBitmaps(mFirstVisibleItem, mVisibleItemCount);
-                } else {
-                    cancelAllTasks();
-                }
+//                if (scrollState == SCROLL_STATE_IDLE) {
+//                    loadBitmaps(mFirstVisibleItem, mVisibleItemCount);
+//                } else {
+//                    cancelAllTasks();
+//                }
             }
 
             @Override
             public void onScroll(AbsListView view, int firstVisibleItem, int visibleItemCount, int totalItemCount) {
 
-                mFirstVisibleItem = firstVisibleItem;
-                mVisibleItemCount = visibleItemCount;
-                // 下载的任务应该由onScrollStateChanged里调用，但首次进入程序时onScrollStateChanged并不会调用，
-                // 因此在这里为首次进入程序开启下载任务。
-                if (mIsFirstEnter && visibleItemCount > 0) {
-                    loadBitmaps(firstVisibleItem, visibleItemCount);
-                    mIsFirstEnter = false;
-                }
+//                mFirstVisibleItem = firstVisibleItem;
+//                mVisibleItemCount = visibleItemCount;
+//                // 下载的任务应该由onScrollStateChanged里调用，但首次进入程序时onScrollStateChanged并不会调用，
+//                // 因此在这里为首次进入程序开启下载任务。
+//                if (mIsFirstEnter && visibleItemCount > 0) {
+//                    loadBitmaps(firstVisibleItem, visibleItemCount);
+//                    mIsFirstEnter = false;
+//                }
             }
         });
         mPhotoAdapter = new PhotoAdapter();
@@ -99,26 +104,26 @@ public class MainActivity extends FragmentActivity {
         initAlbums();
     }
 
-    private void loadBitmaps(int firstVisibleItem, int visibleItemCount) {
-
-        try {
-            for (int i = firstVisibleItem; i < firstVisibleItem + visibleItemCount; i++) {
-
-                String imageUrl = mPhotos.get(i);
-                Bitmap imageBitmap = mMemoryCache.get(convertToHexKey(imageUrl));
-                if (imageBitmap != null) {
-                    ((ImageView) mShowPhotoGridView.findViewWithTag(imageUrl)).setImageBitmap(imageBitmap);
-                } else {
-                    BitmapLoadTask task = new BitmapLoadTask();
-                    task.execute(mPhotos.get(i));
-                    mBitmapLoadTaskSet.add(task);
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-    }
+//    private void loadBitmaps(int firstVisibleItem, int visibleItemCount) {
+//
+//        try {
+//            for (int i = firstVisibleItem; i < firstVisibleItem + visibleItemCount; i++) {
+//
+//                String imageUrl = mPhotos.get(i);
+//                Bitmap imageBitmap = mMemoryCache.get(convertToHexKey(imageUrl));
+//                if (imageBitmap != null) {
+//                    ((ImageView) mShowPhotoGridView.findViewWithTag(imageUrl)).setImageBitmap(imageBitmap);
+//                } else {
+//                    BitmapLoadTask task = new BitmapLoadTask();
+//                    task.execute(mPhotos.get(i));
+//                    mBitmapLoadTaskSet.add(task);
+//                }
+//            }
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//        }
+//
+//    }
 
     /**
      * 取消所有正在下载或等待下载的任务。
@@ -161,10 +166,16 @@ public class MainActivity extends FragmentActivity {
     class BitmapLoadTask extends AsyncTask<String, Void, Bitmap> {
 
         private String imageUrl;
+        private WeakReference<ImageView> referImageView;
+
+        public BitmapLoadTask(ImageView imageView) {
+            referImageView = new WeakReference<>(imageView);
+        }
 
         @Override
         protected Bitmap doInBackground(String... params) {
             imageUrl = params[0];
+
             Bitmap bitmap = loadNativeFile(imageUrl, mGridItemWidth, mGridItemWidth);
             mMemoryCache.put(convertToHexKey(imageUrl), bitmap);
             return bitmap;
@@ -178,16 +189,32 @@ public class MainActivity extends FragmentActivity {
         @Override
         protected void onPostExecute(Bitmap bitmap) {
             super.onPostExecute(bitmap);
-
-            ImageView imageView = (ImageView) mShowPhotoGridView.findViewWithTag(imageUrl);
-            imageView.setImageBitmap(bitmap);
-
+            referImageView.get().setImageBitmap(bitmap);
             mBitmapLoadTaskSet.remove(this);
         }
 
         @Override
         protected void onCancelled() {
             super.onCancelled();
+        }
+    }
+
+    /**
+     * A custom Drawable that will be attached to the imageView while the work is in progress.
+     * Contains a reference to the actual worker task, so that it can be stopped if a new binding is
+     * required, and makes sure that only the last started worker process can bind its result,
+     * independently of the finish order.
+     */
+    private static class AsyncDrawable extends BitmapDrawable {
+        private final WeakReference<BitmapLoadTask> bitmapWorkerTaskReference;
+
+        public AsyncDrawable(Resources res, Bitmap bitmap, BitmapLoadTask bitmapWorkerTask) {
+            super(res, bitmap);
+            bitmapWorkerTaskReference = new WeakReference<BitmapLoadTask>(bitmapWorkerTask);
+        }
+
+        public BitmapLoadTask getBitmapWorkerTask() {
+            return bitmapWorkerTaskReference.get();
         }
     }
 
@@ -220,15 +247,19 @@ public class MainActivity extends FragmentActivity {
                 imageView = (ImageView) convertView;
             }
 
-            imageView.setTag(mPhotos.get(position));
             Bitmap bitmap = mMemoryCache.get(convertToHexKey(mPhotos.get(position)));
-            if(bitmap!=null){
+            if (bitmap != null) {
                 imageView.setImageBitmap(bitmap);
-            }else {
+            } else {
                 imageView.setImageResource(R.drawable.empty_photo);
+                String imageUrl = mPhotos.get(position);
+                BitmapLoadTask task = new BitmapLoadTask(imageView);
+                task.execute(imageUrl);
+                mBitmapLoadTaskSet.add(task);
             }
             return imageView;
         }
+
     }
 
 
@@ -253,7 +284,7 @@ public class MainActivity extends FragmentActivity {
 
 
         int inSampleSize = 1;
-        while (options.outHeight / inSampleSize > height || options.outWidth / inSampleSize > width) {
+        while (options.outHeight / inSampleSize > height && options.outWidth / inSampleSize > width) {
             inSampleSize *= 2;
         }
 
