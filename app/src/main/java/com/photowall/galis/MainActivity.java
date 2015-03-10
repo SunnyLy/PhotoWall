@@ -6,7 +6,7 @@ import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.drawable.BitmapDrawable;
-import android.os.AsyncTask;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.support.v4.app.FragmentActivity;
@@ -36,12 +36,13 @@ public class MainActivity extends FragmentActivity {
     private GridView mShowPhotoGridView;
     private int mGridItemWidth;
     private LinkedList<String> mPhotos;
-    private LruCache<String, Bitmap> mMemoryCache;
+    private LruCache<String, BitmapDrawable> mMemoryCache;
     private Set<BitmapLoadTask> mBitmapLoadTaskSet;
     private PhotoAdapter mPhotoAdapter;
     private int mFirstVisibleItem;
     private int mVisibleItemCount;
     private boolean mIsFirstEnter = true;
+    private Bitmap mLoadingBitmap;
 
     private final Object mPauseWorkLock = new Object();
 
@@ -50,21 +51,25 @@ public class MainActivity extends FragmentActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        mMaxMemory = (int) (Runtime.getRuntime().maxMemory() / 8);
-        mMemoryCache = new LruCache<String, Bitmap>(mMaxMemory) {
+        mMaxMemory = (int) (Runtime.getRuntime().maxMemory() / 4);
+
+        if (BuildConfig.DEBUG) {
+            System.out.println(mMaxMemory + "");
+        }
+        mMemoryCache = new LruCache<String, BitmapDrawable>(mMaxMemory) {
             @Override
-            protected void entryRemoved(boolean evicted, String key, Bitmap oldValue, Bitmap newValue) {
+            protected void entryRemoved(boolean evicted, String key, BitmapDrawable oldValue, BitmapDrawable newValue) {
                 super.entryRemoved(evicted, key, oldValue, newValue);
             }
 
             @Override
-            protected Bitmap create(String key) {
+            protected BitmapDrawable create(String key) {
                 return super.create(key);
             }
 
             @Override
-            protected int sizeOf(String key, Bitmap bitmap) {
-                return bitmap.getByteCount();
+            protected int sizeOf(String key, BitmapDrawable bitmapDrawable) {
+                return bitmapDrawable.getBitmap().getByteCount();
             }
         };
 
@@ -101,9 +106,49 @@ public class MainActivity extends FragmentActivity {
         });
         mPhotoAdapter = new PhotoAdapter();
         mShowPhotoGridView.setAdapter(mPhotoAdapter);
+        mLoadingBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.empty_photo);
         initAlbums();
     }
 
+
+    /**
+     * Returns true if the current work has been canceled or if there was no work in
+     * progress on this image view.
+     * Returns false if the work in progress deals with the same data. The work is not
+     * stopped in that case.
+     */
+    public static boolean cancelPotentialWork(String data, ImageView imageView) {
+        //BEGIN_INCLUDE(cancel_potential_work)
+        final BitmapLoadTask bitmapWorkerTask = getBitmapWorkerTask(imageView);
+
+        if (bitmapWorkerTask != null) {
+            final String bitmapData = bitmapWorkerTask.imageUrl;
+            if (bitmapData == null || !bitmapData.equals(data)) {
+                bitmapWorkerTask.cancel(true);
+            } else {
+                // The same work is already in progress.
+                return false;
+            }
+        }
+        return true;
+        //END_INCLUDE(cancel_potential_work)
+    }
+
+    /**
+     * @param imageView Any imageView
+     * @return Retrieve the currently active work task (if any) associated with this imageView.
+     * null if there is no such task.
+     */
+    private static BitmapLoadTask getBitmapWorkerTask(ImageView imageView) {
+        if (imageView != null) {
+            final Drawable drawable = imageView.getDrawable();
+            if (drawable instanceof AsyncDrawable) {
+                final AsyncDrawable asyncDrawable = (AsyncDrawable) drawable;
+                return asyncDrawable.getBitmapLoadTask();
+            }
+        }
+        return null;
+    }
 //    private void loadBitmaps(int firstVisibleItem, int visibleItemCount) {
 //
 //        try {
@@ -163,22 +208,21 @@ public class MainActivity extends FragmentActivity {
     }
 
 
-    class BitmapLoadTask extends AsyncTask<String, Void, Bitmap> {
+    class BitmapLoadTask extends AsyncTask<Void, Void, BitmapDrawable> {
 
         private String imageUrl;
         private WeakReference<ImageView> referImageView;
 
-        public BitmapLoadTask(ImageView imageView) {
+        public BitmapLoadTask(String url, ImageView imageView) {
+            imageUrl = url;
             referImageView = new WeakReference<>(imageView);
         }
 
         @Override
-        protected Bitmap doInBackground(String... params) {
-            imageUrl = params[0];
-
-            Bitmap bitmap = loadNativeFile(imageUrl, mGridItemWidth, mGridItemWidth);
-            mMemoryCache.put(convertToHexKey(imageUrl), bitmap);
-            return bitmap;
+        protected BitmapDrawable doInBackground(Void... params) {
+            BitmapDrawable bitmapDrawable = new BitmapDrawable(loadNativeFile(imageUrl, mGridItemWidth, mGridItemWidth));
+            mMemoryCache.put(convertToHexKey(imageUrl), bitmapDrawable);
+            return bitmapDrawable;
         }
 
         @Override
@@ -187,10 +231,15 @@ public class MainActivity extends FragmentActivity {
         }
 
         @Override
-        protected void onPostExecute(Bitmap bitmap) {
+        protected void onPostExecute(BitmapDrawable bitmap) {
             super.onPostExecute(bitmap);
-            referImageView.get().setImageBitmap(bitmap);
-            mBitmapLoadTaskSet.remove(this);
+            Drawable bgDrawble = referImageView.get().getDrawable();
+            if (bgDrawble instanceof AsyncDrawable) {
+                BitmapLoadTask task = ((AsyncDrawable) bgDrawble).getBitmapLoadTask();
+                if (this == task) {
+                    referImageView.get().setImageDrawable(bitmap);
+                }
+            }
         }
 
         @Override
@@ -210,10 +259,10 @@ public class MainActivity extends FragmentActivity {
 
         public AsyncDrawable(Resources res, Bitmap bitmap, BitmapLoadTask bitmapWorkerTask) {
             super(res, bitmap);
-            bitmapWorkerTaskReference = new WeakReference<BitmapLoadTask>(bitmapWorkerTask);
+            bitmapWorkerTaskReference = new WeakReference<>(bitmapWorkerTask);
         }
 
-        public BitmapLoadTask getBitmapWorkerTask() {
+        public BitmapLoadTask getBitmapLoadTask() {
             return bitmapWorkerTaskReference.get();
         }
     }
@@ -247,76 +296,74 @@ public class MainActivity extends FragmentActivity {
                 imageView = (ImageView) convertView;
             }
 
-            Bitmap bitmap = mMemoryCache.get(convertToHexKey(mPhotos.get(position)));
-            if (bitmap != null) {
-                imageView.setImageBitmap(bitmap);
-            } else {
-                imageView.setImageResource(R.drawable.empty_photo);
-                String imageUrl = mPhotos.get(position);
-                BitmapLoadTask task = new BitmapLoadTask(imageView);
-                task.execute(imageUrl);
-                mBitmapLoadTaskSet.add(task);
+            BitmapDrawable bpDrawable = mMemoryCache.get(convertToHexKey(mPhotos.get(position)));
+            String imageUrl = mPhotos.get(position);
+            if (bpDrawable != null) {
+                imageView.setImageDrawable(bpDrawable);
+            } else if(cancelPotentialWork(imageUrl,imageView)){
+                BitmapLoadTask task = new BitmapLoadTask(imageUrl, imageView);
+                AsyncDrawable asynDrawable = new AsyncDrawable(getResources(), mLoadingBitmap, task);
+                task.executeOnExecutor(AsyncTask.DUAL_THREAD_EXECUTOR);
+                imageView.setImageDrawable(asynDrawable);
             }
             return imageView;
         }
-
     }
 
+        /**
+         * 加载本地图片到内存
+         *
+         * @param path
+         * @param width
+         * @param height
+         * @return
+         */
+        private Bitmap loadNativeFile(String path, int width, int height) {
 
-    /**
-     * 加载本地图片到内存
-     *
-     * @param path
-     * @param width
-     * @param height
-     * @return
-     */
-    private Bitmap loadNativeFile(String path, int width, int height) {
+            File image = new File(path);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            if (!image.exists()) {
+                throw new NullPointerException(path + "is not exist!!");
+            }
 
-        File image = new File(path);
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inJustDecodeBounds = true;
-        if (!image.exists()) {
-            throw new NullPointerException(path + "is not exist!!");
+            BitmapFactory.decodeFile(path, options);
+
+
+            int inSampleSize = 1;
+            while (options.outHeight / inSampleSize > height && options.outWidth / inSampleSize > width) {
+                inSampleSize *= 2;
+            }
+
+            options.inSampleSize = inSampleSize;
+            options.inJustDecodeBounds = false;
+
+            try {
+                return BitmapFactory.decodeStream(new FileInputStream(image), null, options);
+            } catch (FileNotFoundException e) {
+                e.printStackTrace();
+            }
+            return null;
         }
 
-        BitmapFactory.decodeFile(path, options);
 
-
-        int inSampleSize = 1;
-        while (options.outHeight / inSampleSize > height && options.outWidth / inSampleSize > width) {
-            inSampleSize *= 2;
+        private String convertToHexKey(String key) {
+            try {
+                MessageDigest messageDigest = MessageDigest.getInstance("MD5");
+                messageDigest.update(key.getBytes());
+                return byteToHexString(messageDigest.digest());
+            } catch (NoSuchAlgorithmException e) {
+                e.printStackTrace();
+            }
+            return null;
         }
 
-        options.inSampleSize = inSampleSize;
-        options.inJustDecodeBounds = false;
-
-        try {
-            return BitmapFactory.decodeStream(new FileInputStream(image), null, options);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
+        private String byteToHexString(byte[] bytes) {
+            StringBuilder stringBuilder = new StringBuilder();
+            for (int i = 0; i < bytes.length; i++) {
+                String hex = Integer.toHexString(0xFF & bytes[i]);
+                stringBuilder.append(hex.length() == 1 ? "0" : hex);
+            }
+            return stringBuilder.toString();
         }
-        return null;
     }
-
-
-    private String convertToHexKey(String key) {
-        try {
-            MessageDigest messageDigest = MessageDigest.getInstance("MD5");
-            messageDigest.update(key.getBytes());
-            return byteToHexString(messageDigest.digest());
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        return null;
-    }
-
-    private String byteToHexString(byte[] bytes) {
-        StringBuilder stringBuilder = new StringBuilder();
-        for (int i = 0; i < bytes.length; i++) {
-            String hex = Integer.toHexString(0xFF & bytes[i]);
-            stringBuilder.append(hex.length() == 1 ? "0" : hex);
-        }
-        return stringBuilder.toString();
-    }
-}
