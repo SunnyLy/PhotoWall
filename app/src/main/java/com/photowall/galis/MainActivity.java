@@ -216,12 +216,17 @@ public class MainActivity extends FragmentActivity {
                 imageView = new ImageView(parent.getContext());
                 imageView.setLayoutParams(new ViewGroup.LayoutParams(mGridItemWidth, mGridItemWidth));
                 imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                imageView.setImageResource(R.drawable.abc_cab_background_internal_bg);
             } else {
                 imageView = (ImageView) convertView;
             }
 
             imageView.setTag(mPhotos.get(position));
+            Bitmap bitmap = mMemoryCache.get(convertToHexKey(mPhotos.get(position)));
+            if(bitmap!=null){
+                imageView.setImageBitmap(bitmap);
+            }else {
+                imageView.setImageResource(R.drawable.empty_photo);
+            }
             return imageView;
         }
     }

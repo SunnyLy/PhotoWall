@@ -1299,6 +1299,7 @@ containing a value of this type.
         public static final int abc_textfield_search_activated_mtrl_alpha=0x7f020030;
         public static final int abc_textfield_search_default_mtrl_alpha=0x7f020031;
         public static final int abc_textfield_search_material=0x7f020032;
+        public static final int empty_photo=0x7f020033;
     }
     public static final class id {
         public static final int action_bar=0x7f090031;
