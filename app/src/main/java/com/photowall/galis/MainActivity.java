@@ -4,7 +4,6 @@ import android.content.ContentResolver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Color;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.provider.MediaStore;
@@ -25,7 +24,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.Set;
 
 
@@ -69,16 +67,16 @@ public class MainActivity extends FragmentActivity {
         DisplayMetrics displayMetrics = new DisplayMetrics();
         getWindowManager().getDefaultDisplay().getMetrics(displayMetrics);
 
-        mGridItemWidth = (int) ((displayMetrics.widthPixels-2*5*displayMetrics.density)/3);
+        mGridItemWidth = (int) ((displayMetrics.widthPixels - 2 * 5 * displayMetrics.density) / 3);
 
         mBitmapLoadTaskSet = new LinkedHashSet<>();
         mShowPhotoGridView = (GridView) findViewById(R.id.showPhotoGridView);
         mShowPhotoGridView.setOnScrollListener(new AbsListView.OnScrollListener() {
             @Override
             public void onScrollStateChanged(AbsListView view, int scrollState) {
-                if(scrollState==SCROLL_STATE_IDLE){
-                    loadBitmaps(mFirstVisibleItem,mVisibleItemCount);
-                }else {
+                if (scrollState == SCROLL_STATE_IDLE) {
+                    loadBitmaps(mFirstVisibleItem, mVisibleItemCount);
+                } else {
                     cancelAllTasks();
                 }
             }
@@ -92,7 +90,7 @@ public class MainActivity extends FragmentActivity {
                 // 因此在这里为首次进入程序开启下载任务。
                 if (mIsFirstEnter && visibleItemCount > 0) {
                     loadBitmaps(firstVisibleItem, visibleItemCount);
-                    mIsFirstEnter= false;
+                    mIsFirstEnter = false;
                 }
             }
         });
@@ -105,9 +103,16 @@ public class MainActivity extends FragmentActivity {
 
         try {
             for (int i = firstVisibleItem; i < firstVisibleItem + visibleItemCount; i++) {
-                BitmapLoadTask task = new BitmapLoadTask();
-                task.execute(mPhotos.get(i));
-                mBitmapLoadTaskSet.add(task);
+
+                String imageUrl = mPhotos.get(i);
+                Bitmap imageBitmap = mMemoryCache.get(convertToHexKey(imageUrl));
+                if (imageBitmap != null) {
+                    ((ImageView) mShowPhotoGridView.findViewWithTag(imageUrl)).setImageBitmap(imageBitmap);
+                } else {
+                    BitmapLoadTask task = new BitmapLoadTask();
+                    task.execute(mPhotos.get(i));
+                    mBitmapLoadTaskSet.add(task);
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -115,10 +120,10 @@ public class MainActivity extends FragmentActivity {
 
     }
 
-
     /**
      * 取消所有正在下载或等待下载的任务。
      */
+
     public void cancelAllTasks() {
         if (mBitmapLoadTaskSet != null) {
             for (BitmapLoadTask task : mBitmapLoadTaskSet) {
@@ -160,13 +165,8 @@ public class MainActivity extends FragmentActivity {
         @Override
         protected Bitmap doInBackground(String... params) {
             imageUrl = params[0];
-            String hexKey = convertToHexKey(imageUrl);
-            Bitmap bitmap = mMemoryCache.get(hexKey);
-            if (bitmap == null) {
-                mBitmapLoadTaskSet.add(this);
-                bitmap = loadNativeFile(imageUrl, mGridItemWidth, mGridItemWidth);
-                mMemoryCache.put(hexKey, bitmap);
-            }
+            Bitmap bitmap = loadNativeFile(imageUrl, mGridItemWidth, mGridItemWidth);
+            mMemoryCache.put(convertToHexKey(imageUrl), bitmap);
             return bitmap;
         }
 
@@ -216,13 +216,12 @@ public class MainActivity extends FragmentActivity {
                 imageView = new ImageView(parent.getContext());
                 imageView.setLayoutParams(new ViewGroup.LayoutParams(mGridItemWidth, mGridItemWidth));
                 imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                imageView.setImageResource(R.drawable.abc_cab_background_internal_bg);
             } else {
                 imageView = (ImageView) convertView;
             }
 
-            imageView.setImageResource(R.drawable.abc_cab_background_internal_bg);
             imageView.setTag(mPhotos.get(position));
-
             return imageView;
         }
     }
@@ -249,7 +248,7 @@ public class MainActivity extends FragmentActivity {
 
 
         int inSampleSize = 1;
-        while (options.outHeight /inSampleSize> height || options.outWidth/inSampleSize > width) {
+        while (options.outHeight / inSampleSize > height || options.outWidth / inSampleSize > width) {
             inSampleSize *= 2;
         }
 
