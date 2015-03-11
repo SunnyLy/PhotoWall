@@ -15,6 +15,7 @@ import android.os.Bundle;
 import android.provider.MediaStore;
 import android.support.v4.app.FragmentActivity;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.util.LruCache;
 import android.view.View;
 import android.view.ViewGroup;
@@ -24,6 +25,7 @@ import android.widget.GridView;
 import android.widget.ImageView;
 
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -31,6 +33,9 @@ import java.lang.ref.SoftReference;
 import java.lang.ref.WeakReference;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.Set;
@@ -48,6 +53,7 @@ public class MainActivity extends FragmentActivity {
     private PhotoAdapter mPhotoAdapter;
     private Bitmap mLoadingBitmap;
     private boolean mFadeInBitmap = true;
+    private Resources mResources;
 
     private final Object mPauseWorkLock = new Object();
     private Set<SoftReference<Bitmap>> mReusableBitmaps;
@@ -71,13 +77,15 @@ public class MainActivity extends FragmentActivity {
                     // The removed entry is a recycling drawable, so notify it
                     // that it has been removed from the memory cache
                     ((RecyclingBitmapDrawable) oldValue).setIsCached(false);
+                    System.out.println("RecyclingBitmapDrawable");
                 } else {
                     // The removed entry is a standard BitmapDrawable
 
                     if (Utils.hasHoneycomb()) {
                         // We're running on Honeycomb or later, so add the bitmap
                         // to a SoftReference set for possible use with inBitmap later
-                        mReusableBitmaps.add(new SoftReference<Bitmap>(oldValue.getBitmap()));
+                        mReusableBitmaps.add(new SoftReference<>(oldValue.getBitmap()));
+                        System.out.println("StandardBitmapDrawable");
                     }
                 }
             }
@@ -116,6 +124,7 @@ public class MainActivity extends FragmentActivity {
         mPhotoAdapter = new PhotoAdapter();
         mShowPhotoGridView.setAdapter(mPhotoAdapter);
         mLoadingBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.empty_photo);
+        mReusableBitmaps = Collections.synchronizedSet(new HashSet<SoftReference<Bitmap>>());
         initAlbums();
     }
 
@@ -222,17 +231,24 @@ public class MainActivity extends FragmentActivity {
             if (bitmap == null) {
                 if (BuildConfig.DEBUG) {
                     System.out.println(imageUrl);
-                    return new BitmapDrawable(mLoadingBitmap);
+                    return new BitmapDrawable(mResources,mLoadingBitmap);
                 }
             }
-            BitmapDrawable bitmapDrawable = new RecyclingBitmapDrawable(getResources(), bitmap);
-            if (RecyclingBitmapDrawable.class.isInstance(bitmapDrawable)) {
-                // The removed entry is a recycling drawable, so notify it
-                // that it has been added into the memory cache
-                ((RecyclingBitmapDrawable) bitmapDrawable).setIsCached(true);
+
+            BitmapDrawable drawable = null;
+            if (bitmap != null) {
+                if (Utils.hasHoneycomb()) {
+                    // Running on Honeycomb or newer, so wrap in a standard BitmapDrawable
+                    drawable = new BitmapDrawable(mResources, bitmap);
+                } else {
+                    // Running on Gingerbread or older, so wrap in a RecyclingBitmapDrawable
+                    // which will recycle automagically
+                    drawable = new RecyclingBitmapDrawable(mResources, bitmap);
+                }
+                mMemoryCache.put(convertToHexKey(imageUrl), drawable);
             }
-            mMemoryCache.put(convertToHexKey(imageUrl), bitmapDrawable);
-            return bitmapDrawable;
+
+            return drawable;
         }
 
         @Override
@@ -241,14 +257,13 @@ public class MainActivity extends FragmentActivity {
         }
 
         @Override
-        protected void onPostExecute(BitmapDrawable bitmap) {
-            super.onPostExecute(bitmap);
+        protected void onPostExecute(BitmapDrawable bitmapDrawable) {
+            super.onPostExecute(bitmapDrawable);
             Drawable bgDrawble = referImageView.get().getDrawable();
             if (bgDrawble instanceof AsyncDrawable) {
                 BitmapLoadTask task = ((AsyncDrawable) bgDrawble).getBitmapLoadTask();
                 if (this == task) {
-                    setImageDrawable(referImageView.get(), bitmap);
-//                    referImageView.get().setImageDrawable(bitmap);
+                    setImageDrawable(referImageView.get(), bitmapDrawable);
                 }
             }
         }
@@ -333,31 +348,90 @@ public class MainActivity extends FragmentActivity {
 
         File image = new File(path);
         BitmapFactory.Options options = new BitmapFactory.Options();
+
         options.inJustDecodeBounds = true;
         if (!image.exists()) {
             throw new NullPointerException(path + "is not exist!!");
         }
 
-        BitmapFactory.decodeFile(path, options);
-
-
-        int inSampleSize = 1;
-        while (options.outHeight / inSampleSize > height && options.outWidth / inSampleSize > width) {
-            inSampleSize *= 2;
-        }
-
-        options.inSampleSize = inSampleSize;
-        options.inJustDecodeBounds = false;
-
+        FileDescriptor fd = null;
         try {
-            return BitmapFactory.decodeFileDescriptor(new FileInputStream(image).getFD(), null, options);
-//                return BitmapFactory.decodeStream(new FileInputStream(image), null, options);
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
+            fd = new FileInputStream(image).getFD();
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return null;
+        BitmapFactory.decodeFileDescriptor(fd,null, options);
+
+
+        options.inSampleSize = calculateInSampleSize(options, width, height);
+        options.inJustDecodeBounds = false;
+        options.inPreferredConfig = Bitmap.Config.RGB_565;
+
+
+        addInBitmapOptions(options);
+        return BitmapFactory.decodeFileDescriptor(fd, null, options);
+    }
+
+    @TargetApi(Build.VERSION_CODES.HONEYCOMB)
+    private void addInBitmapOptions(BitmapFactory.Options options) {
+        //BEGIN_INCLUDE(add_bitmap_options)
+        // inBitmap only works with mutable bitmaps so force the decoder to
+        // return mutable bitmaps.
+        options.inMutable = true;
+
+        // Try and find a bitmap to use for inBitmap
+        Bitmap inBitmap = getBitmapFromReusableSet(options);
+
+        if (inBitmap != null) {
+            options.inBitmap = inBitmap;
+        }
+        //END_INCLUDE(add_bitmap_options)
+    }
+
+    /**
+     * @param options - BitmapFactory.Options with out* options populated
+     * @return Bitmap that case be used for inBitmap
+     */
+    protected Bitmap getBitmapFromReusableSet(BitmapFactory.Options options) {
+        //BEGIN_INCLUDE(get_bitmap_from_reusable_set)
+        Bitmap bitmap = null;
+
+        if (mReusableBitmaps != null && !mReusableBitmaps.isEmpty()) {
+            synchronized (mReusableBitmaps) {
+                final Iterator<SoftReference<Bitmap>> iterator = mReusableBitmaps.iterator();
+                Bitmap item;
+
+                while (iterator.hasNext()) {
+                    item = iterator.next().get();
+
+                    if (null != item && item.isMutable()) {
+                        // Check to see it the item can be used for inBitmap
+                        if (canUseForInBitmap(item, options)) {
+                            bitmap = item;
+                            Log.e("Reuse!","reuse");
+                            // Remove from reusable set so it can't be used again
+                            iterator.remove();
+                            break;
+                        }
+                    } else {
+                        // Remove from the set if the reference has been cleared.
+                        iterator.remove();
+                    }
+                }
+            }
+        }
+
+        return bitmap;
+        //END_INCLUDE(get_bitmap_from_reusable_set)
+    }
+
+    public static int calculateInSampleSize(BitmapFactory.Options options,
+                                            int reqWidth, int reqHeight) {
+        int inSampleSize = 1;
+        while (options.outHeight / inSampleSize > reqHeight && options.outWidth / inSampleSize > reqWidth) {
+            inSampleSize *= 2;
+        }
+        return inSampleSize;
     }
 
     private void setImageDrawable(ImageView imageView, Drawable drawable) {
@@ -379,8 +453,49 @@ public class MainActivity extends FragmentActivity {
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.KITKAT)
+    private static boolean canUseForInBitmap(
+            Bitmap candidate, BitmapFactory.Options targetOptions) {
+//        int width = targetOptions.outWidth / targetOptions.inSampleSize;
+//        int height = targetOptions.outHeight / targetOptions.inSampleSize;
+//
+//        // Returns true if "candidate" can be used for inBitmap re-use with
+//        // "targetOptions".
+//        return candidate.getWidth() == width && candidate.getHeight() == height;
+        //BEGIN_INCLUDE(can_use_for_inbitmap)
+        if (!Utils.hasKitKat()) {
+            // On earlier versions, the dimensions must match exactly and the inSampleSize must be 1
+            return candidate.getWidth() == targetOptions.outWidth
+                    && candidate.getHeight() == targetOptions.outHeight
+                    && targetOptions.inSampleSize == 1;
+        }
 
+        // From Android 4.4 (KitKat) onward we can re-use if the byte size of the new bitmap
+        // is smaller than the reusable bitmap candidate allocation byte count.
+        int width = targetOptions.outWidth / targetOptions.inSampleSize;
+        int height = targetOptions.outHeight / targetOptions.inSampleSize;
+        int byteCount = width * height * getBytesPerPixel(candidate.getConfig());
+        return byteCount <= candidate.getAllocationByteCount();
+        //END_INCLUDE(can_use_for_inbitmap)
+    }
 
+    /**
+     * Return the byte usage per pixel of a bitmap based on its configuration.
+     * @param config The bitmap configuration.
+     * @return The byte usage per pixel.
+     */
+    private static int getBytesPerPixel(Bitmap.Config config) {
+        if (config == Bitmap.Config.ARGB_8888) {
+            return 4;
+        } else if (config == Bitmap.Config.RGB_565) {
+            return 2;
+        } else if (config == Bitmap.Config.ARGB_4444) {
+            return 2;
+        } else if (config == Bitmap.Config.ALPHA_8) {
+            return 1;
+        }
+        return 1;
+    }
     private String convertToHexKey(String key) {
         try {
             MessageDigest messageDigest = MessageDigest.getInstance("MD5");

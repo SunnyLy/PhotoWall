@@ -228,7 +228,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
             Executors.newSingleThreadExecutor(sThreadFactory);
 
     public static final Executor DUAL_THREAD_EXECUTOR =
-            Executors.newFixedThreadPool(2, sThreadFactory);
+            Executors.newFixedThreadPool(3,sThreadFactory);
 
     private static final int MESSAGE_POST_RESULT = 0x1;
     private static final int MESSAGE_POST_PROGRESS = 0x2;
